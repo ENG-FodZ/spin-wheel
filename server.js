@@ -1,7 +1,7 @@
 
 const path = require('path');
 const express = require('express');
-const { DatabaseSync } = require('node:sqlite');
+const { neon } = require('@neondatabase/serverless');
 const cookieSession = require('cookie-session');
 const rateLimit = require('express-rate-limit');
 const crypto = require('crypto');
@@ -9,11 +9,12 @@ require('dotenv').config();
 
 const app = express();
 
-// Trust Vercel proxy
 app.set('trust proxy', 1);
-
-// Middleware
 app.use(express.json());
+
+if (process.env.NODE_ENV === 'production' && !process.env.SESSION_SECRET) {
+  throw new Error('SESSION_SECRET is required in production');
+}
 
 app.use(cookieSession({
   name: 'sw',
@@ -24,22 +25,56 @@ app.use(cookieSession({
   secure: process.env.NODE_ENV === 'production'
 }));
 
-// Database
-const db = new DatabaseSync(
-  process.env.DB_PATH || path.join(__dirname, 'data.db')
-);
+// ==================================
+// NEON DATABASE
+// ==================================
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS players (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    phone TEXT UNIQUE NOT NULL,
-    prize TEXT,
-    spun_at TEXT,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
-  );
-`);
+const sql = process.env.DATABASE_URL
+  ? neon(process.env.DATABASE_URL)
+  : null;
 
-// Prizes
+let dbReadyPromise;
+
+async function ensureDatabase() {
+  if (!sql) {
+    throw new Error('DATABASE_URL is missing');
+  }
+
+  if (!dbReadyPromise) {
+    dbReadyPromise = sql`
+      CREATE TABLE IF NOT EXISTS players (
+        id SERIAL PRIMARY KEY,
+        phone TEXT UNIQUE NOT NULL,
+        prize TEXT,
+        spun_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `.catch(error => {
+      dbReadyPromise = null;
+      throw error;
+    });
+  }
+
+  await dbReadyPromise;
+}
+
+// Ensure database exists before API requests
+app.use('/api', async (req, res, next) => {
+  try {
+    await ensureDatabase();
+    next();
+  } catch (error) {
+    console.error('Database initialization failed:', error);
+    res.status(503).json({
+      error: 'Database unavailable. Check DATABASE_URL.'
+    });
+  }
+});
+
+// ==================================
+// PRIZES
+// ==================================
+
 const PRIZES = [
   { label: '10% off', weight: 20 },
   { label: 'Buy 1 get 20% off 2nd', weight: 15 },
@@ -49,7 +84,6 @@ const PRIZES = [
   { label: 'Better luck next time', weight: 25 }
 ];
 
-// Random prize selection
 function pickPrize() {
   const total = PRIZES.reduce((sum, p) => sum + p.weight, 0);
   let random = crypto.randomInt(0, total);
@@ -57,15 +91,16 @@ function pickPrize() {
   for (let i = 0; i < PRIZES.length; i++) {
     random -= PRIZES[i].weight;
 
-    if (random < 0) {
-      return i;
-    }
+    if (random < 0) return i;
   }
 
   return PRIZES.length - 1;
 }
 
-// Phone normalization
+// ==================================
+// PHONE VALIDATION
+// ==================================
+
 function normPhone(raw) {
   let phone = String(raw || '').replace(/[^\d+]/g, '');
   const cc = process.env.DEFAULT_COUNTRY_CODE || '20';
@@ -81,120 +116,170 @@ function normPhone(raw) {
   return /^\+\d{9,15}$/.test(phone) ? phone : null;
 }
 
-// Rate limiter
+// ==================================
+// RATE LIMITER
+// ==================================
+
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 40
+  max: 40,
+  standardHeaders: true,
+  legacyHeaders: false
 });
 
 // ==================================
-// PUBLIC FRONTEND
+// FRONTEND
 // ==================================
 
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Homepage
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 // ==================================
-// API ROUTES
+// REGISTER PLAYER
 // ==================================
 
-// Register player
-app.post('/api/start', limiter, (req, res) => {
-  const phone = normPhone(req.body.phone);
+app.post('/api/start', limiter, async (req, res, next) => {
+  try {
+    const phone = normPhone(req.body?.phone);
 
-  if (!phone) {
-    return res.status(400).json({
-      error: 'Invalid phone number'
-    });
+    if (!phone) {
+      return res.status(400).json({
+        error: 'Invalid phone number'
+      });
+    }
+
+    await sql`
+      INSERT INTO players (phone)
+      VALUES (${phone})
+      ON CONFLICT (phone) DO NOTHING
+    `;
+
+    const [player] = await sql`
+      SELECT id
+      FROM players
+      WHERE phone = ${phone}
+    `;
+
+    if (!player) {
+      return res.status(500).json({
+        error: 'Could not register player'
+      });
+    }
+
+    req.session.uid = player.id;
+
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
   }
-
-  db.prepare(
-    'INSERT OR IGNORE INTO players(phone) VALUES(?)'
-  ).run(phone);
-
-  const player = db.prepare(
-    'SELECT id FROM players WHERE phone=?'
-  ).get(phone);
-
-  req.session.uid = player.id;
-
-  res.json({ ok: true });
 });
 
-// Current player
-app.get('/api/me', (req, res) => {
-  const user = req.session.uid &&
-    db.prepare(
-      'SELECT phone, prize FROM players WHERE id=?'
-    ).get(req.session.uid);
+// ==================================
+// CURRENT PLAYER
+// ==================================
 
-  if (!user) {
-    return res.status(401).json({
-      error: 'Not signed in'
+app.get('/api/me', async (req, res, next) => {
+  try {
+    const uid = req.session.uid;
+
+    if (!uid) {
+      return res.status(401).json({
+        error: 'Not signed in'
+      });
+    }
+
+    const [user] = await sql`
+      SELECT phone, prize
+      FROM players
+      WHERE id = ${uid}
+    `;
+
+    if (!user) {
+      return res.status(401).json({
+        error: 'Not signed in'
+      });
+    }
+
+    res.json({
+      phone: user.phone,
+      prize: user.prize,
+      prizes: PRIZES.map(p => p.label)
     });
+  } catch (error) {
+    next(error);
   }
-
-  res.json({
-    phone: user.phone,
-    prize: user.prize,
-    prizes: PRIZES.map(p => p.label)
-  });
 });
 
-// Spin wheel
-app.post('/api/spin', limiter, (req, res) => {
-  const uid = req.session.uid;
+// ==================================
+// SPIN WHEEL
+// ==================================
 
-  const user = uid &&
-    db.prepare(
-      'SELECT * FROM players WHERE id=?'
-    ).get(uid);
+app.post('/api/spin', limiter, async (req, res, next) => {
+  try {
+    const uid = req.session.uid;
 
-  if (!user) {
-    return res.status(401).json({
-      error: 'Not signed in'
-    });
-  }
+    if (!uid) {
+      return res.status(401).json({
+        error: 'Not signed in'
+      });
+    }
 
-  if (user.prize) {
-    return res.status(403).json({
-      error: 'This number already spun',
-      prize: user.prize
-    });
-  }
+    const [user] = await sql`
+      SELECT id, prize
+      FROM players
+      WHERE id = ${uid}
+    `;
 
-  const index = pickPrize();
-  const prize = PRIZES[index];
+    if (!user) {
+      return res.status(401).json({
+        error: 'Not signed in'
+      });
+    }
 
-  if (prize.again) {
-    return res.json({
+    if (user.prize) {
+      return res.status(403).json({
+        error: 'This number already spun',
+        prize: user.prize
+      });
+    }
+
+    const index = pickPrize();
+    const prize = PRIZES[index];
+
+    if (prize.again) {
+      return res.json({
+        index,
+        label: prize.label,
+        again: true
+      });
+    }
+
+    const updated = await sql`
+      UPDATE players
+      SET prize = ${prize.label},
+          spun_at = NOW()
+      WHERE id = ${uid}
+        AND prize IS NULL
+      RETURNING id
+    `;
+
+    if (!updated.length) {
+      return res.status(403).json({
+        error: 'This number already spun'
+      });
+    }
+
+    res.json({
       index,
       label: prize.label,
-      again: true
+      again: false
     });
+  } catch (error) {
+    next(error);
   }
-
-  const result = db.prepare(`
-    UPDATE players
-    SET prize=?, spun_at=datetime('now')
-    WHERE id=? AND prize IS NULL
-  `).run(prize.label, uid);
-
-  if (!result.changes) {
-    return res.status(403).json({
-      error: 'This number already spun'
-    });
-  }
-
-  res.json({
-    index,
-    label: prize.label,
-    again: false
-  });
 });
 
 // ==================================
@@ -203,71 +288,84 @@ app.post('/api/spin', limiter, (req, res) => {
 
 function admin(req, res, next) {
   const authorization = req.headers.authorization || '';
+  const parts = authorization.split(' ');
 
-  const encoded = authorization.split(' ')[1] || '';
-
-  let username = '';
-  let password = '';
-
-  try {
-    const decoded = Buffer.from(encoded, 'base64')
-      .toString();
-
-    const separator = decoded.indexOf(':');
-
-    username = separator >= 0
-      ? decoded.slice(0, separator)
-      : '';
-
-    password = separator >= 0
-      ? decoded.slice(separator + 1)
-      : '';
-  } catch {
-    username = '';
-    password = '';
+  if (parts[0] !== 'Basic' || !parts[1]) {
+    return askForLogin(res);
   }
 
-  function safeCompare(a, b) {
-    if (!a || !b || a.length !== b.length) {
-      return false;
-    }
+  const decoded = Buffer.from(parts[1], 'base64').toString();
+  const separator = decoded.indexOf(':');
 
-    return crypto.timingSafeEqual(
-      Buffer.from(a),
-      Buffer.from(b)
-    );
+  const username = separator >= 0
+    ? decoded.slice(0, separator)
+    : '';
+
+  const password = separator >= 0
+    ? decoded.slice(separator + 1)
+    : '';
+
+  function safeCompare(a, b) {
+    const first = Buffer.from(a);
+    const second = Buffer.from(b);
+
+    return first.length > 0 &&
+      first.length === second.length &&
+      crypto.timingSafeEqual(first, second);
   }
 
   const valid =
     safeCompare(username, process.env.ADMIN_USER || '') &&
     safeCompare(password, process.env.ADMIN_PASS || '');
 
-  if (valid) {
-    return next();
-  }
+  if (valid) return next();
 
+  return askForLogin(res);
+}
+
+function askForLogin(res) {
   res.set('WWW-Authenticate', 'Basic realm="Admin"');
-
   return res.status(401).send('Auth required');
 }
 
-// Admin dashboard
+// ==================================
+// ADMIN DASHBOARD
+// ==================================
+
 app.get('/admin', admin, (req, res) => {
   res.sendFile(path.join(__dirname, 'admin.html'));
 });
 
-// Admin users
-app.get('/api/admin/users', admin, (req, res) => {
-  const users = db.prepare(`
-    SELECT id, phone, prize, spun_at, created_at
-    FROM players
-    ORDER BY id DESC
-  `).all();
+// ==================================
+// ADMIN USERS
+// ==================================
 
-  res.json(users);
+app.get('/api/admin/users', admin, async (req, res, next) => {
+  try {
+    const users = await sql`
+      SELECT id, phone, prize, spun_at, created_at
+      FROM players
+      ORDER BY id DESC
+    `;
+
+    res.json(users);
+  } catch (error) {
+    next(error);
+  }
 });
 
-// 404 handler
+// ==================================
+// HEALTH CHECK
+// ==================================
+
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok' });
+});
+
+// ==================================
+// ERROR HANDLING
+// ==================================
+
 app.use((req, res) => {
   res.status(404).json({
     error: 'Route not found',
@@ -275,7 +373,17 @@ app.use((req, res) => {
   });
 });
 
-// Vercel serverless export
+app.use((error, req, res, next) => {
+  console.error('Server error:', error);
+
+  if (res.headersSent) return next(error);
+
+  res.status(500).json({
+    error: 'Internal server error'
+  });
+});
+
+// Vercel
 module.exports = app;
 
 // Local development
