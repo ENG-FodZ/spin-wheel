@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Admin</title>
+<style>
+:root{--bg:#faf7f2;--text:#222;--line:#e0d9cc}
+@media(prefers-color-scheme:dark){:root{--bg:#161616;--text:#f2f2f2;--line:#3a3a3a}}
+body{font-family:system-ui,sans-serif;background:var(--bg);color:var(--text);margin:0;padding:20px}
+.top{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:14px}
+input,button{padding:9px 12px;border:1px solid var(--line);border-radius:8px;background:transparent;color:var(--text);font-size:14px}
+button{cursor:pointer}.wrap{overflow-x:auto}
+table{border-collapse:collapse;width:100%;min-width:640px}th,td{text-align:left;padding:10px;border-bottom:1px solid var(--line);font-size:14px}
+</style></head><body>
+<h2>Users &amp; prizes <small id="count"></small></h2>
+<div class="top"><input id="q" placeholder="Search phone / prize"><button id="csv">Export CSV</button></div>
+<div class="wrap"><table><thead><tr><th>#</th><th>Phone</th><th>Prize</th><th>Spun at (UTC)</th><th>Joined (UTC)</th></tr></thead><tbody id="b"></tbody></table></div>
+<script>
+let rows=[];const cols=['id','phone','prize','spun_at','created_at'];
+function draw(){const q=document.getElementById('q').value.toLowerCase();
+  const f=rows.filter(r=>cols.some(c=>String(r[c]??'').toLowerCase().includes(q)));
+  document.getElementById('count').textContent='('+f.length+')';
+  const b=document.getElementById('b');b.innerHTML='';
+  f.forEach(r=>{const tr=b.insertRow();cols.forEach(c=>tr.insertCell().textContent=r[c]??(c==='prize'?'— not spun yet':''))})}
+fetch('/api/admin/users').then(r=>r.json()).then(d=>{rows=d;draw()});
+document.getElementById('q').oninput=draw;
+document.getElementById('csv').onclick=()=>{
+  const esc=v=>'"'+String(v??'').replace(/"/g,'""')+'"';
+  const t=[cols.join(',')].concat(rows.map(r=>cols.map(c=>esc(r[c])).join(','))).join('\n');
+  const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([t],{type:'text/csv'}));a.download='users.csv';a.click()};
+</script></body></html>
