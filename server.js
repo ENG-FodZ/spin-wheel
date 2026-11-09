@@ -20,7 +20,7 @@ app.use(cookieSession({
   secure: process.env.NODE_ENV === 'production'
 }));
 
-const db = new DatabaseSync(path.join(__dirname, 'data.db'));
+const db = new DatabaseSync(process.env.DB_PATH || path.join(__dirname, 'data.db'));
 db.exec(`CREATE TABLE IF NOT EXISTS players(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   phone TEXT UNIQUE NOT NULL,
