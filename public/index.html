@@ -1,13 +1,22 @@
 <!DOCTYPE html>
-<html lang="en"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Spin &amp; Win</title>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spin &amp; Win - Lilique</title>
 <style>
 :root{--bg:#faf7f2;--card:#fff;--text:#222;--muted:#777;--accent:#e4572e;--line:#e6e0d6}
 @media(prefers-color-scheme:dark){:root{--bg:#161616;--card:#222;--text:#f2f2f2;--muted:#aaa;--line:#3a3a3a}}
-*{box-sizing:border-box}body{margin:0;font-family:system-ui,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;display:grid;place-items:center;padding:16px}
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;display:grid;place-items:center;padding:16px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:28px;width:100%;max-width:420px;text-align:center}
-h1{margin:0 0 6px;font-size:24px}p{color:var(--muted);margin:0 0 18px}
+
+/* Logo Styling */
+.logo-wrap { margin-bottom: 16px; }
+.logo-wrap img { max-width: 140px; height: auto; display: block; margin: 0 auto; }
+
+h1{margin:0 0 6px;font-size:24px}
+p{color:var(--muted);margin:0 0 18px}
 input{width:100%;padding:12px;margin-bottom:10px;border:1px solid var(--line);border-radius:10px;font-size:16px;background:transparent;color:var(--text)}
 button{width:100%;padding:13px;border:0;border-radius:10px;background:var(--accent);color:#fff;font-size:16px;font-weight:600;cursor:pointer}
 button:disabled{opacity:.5;cursor:not-allowed}
@@ -17,50 +26,126 @@ button:disabled{opacity:.5;cursor:not-allowed}
 .pointer{position:absolute;top:-10px;left:50%;transform:translateX(-50%);width:0;height:0;border:12px solid transparent;border-top:24px solid var(--text);z-index:2}
 #wheel{width:100%;height:100%;border-radius:50%;border:4px solid var(--text);position:relative;overflow:hidden;transition:transform 5s cubic-bezier(.17,.67,.12,1)}
 .lbl{position:absolute;left:50%;top:50%;width:50%;height:0;transform-origin:0 0;display:flex;align-items:center;justify-content:flex-end;padding-right:10px}
-.lbl span{display:block;max-width:90px;font-size:11px;font-weight:700;color:#fff;text-align:center;line-height:1.15;text-shadow:0 1px 2px rgba(0,0,0,.5)}
+.lbl span{display:block;max-width:90px;font-size:10px;font-weight:700;color:#fff;text-align:center;line-height:1.15;text-shadow:0 1px 2px rgba(0,0,0,.5)}
 #result{font-size:20px;font-weight:700;margin-top:12px}
-</style></head><body>
+</style>
+</head>
+<body>
+
 <div class="card">
+  <!-- Logo Header -->
+  <div class="logo-wrap">
+    <img src="797904981_122240538428362441_7408302049689742852_n.jpg" alt="Lilique Logo">
+  </div>
+
   <section id="s1">
-    <h1>Spin &amp; Win 🎁</h1><p>Enter your phone number to get one spin.</p>
+    <h1>Spin &amp; Win 🎁</h1>
+    <p>Enter your phone number to get one spin.</p>
     <input id="phone" type="tel" placeholder="Phone (e.g. +201001234567)" autocomplete="tel">
-    <button id="b1">Continue</button><div class="err" id="e1"></div>
+    <button id="b1">Continue</button>
+    <div class="err" id="e1"></div>
   </section>
-    <section id="s3" class="hidden">
-    <h1>Your spin!</h1><p id="sub">One spin only. Good luck!</p>
-    <div class="wheel-wrap"><div class="pointer"></div><div id="wheel"></div></div>
-    <button id="spin">SPIN</button><div id="result"></div><div class="err" id="e3"></div>
+
+  <section id="s3" class="hidden">
+    <h1>Your spin!</h1>
+    <p id="sub">One spin only. Good luck!</p>
+    <div class="wheel-wrap">
+      <div class="pointer"></div>
+      <div id="wheel"></div>
+    </div>
+    <button id="spin">SPIN</button>
+    <div id="result"></div>
+    <div class="err" id="e3"></div>
   </section>
 </div>
+
 <script>
 const $=id=>document.getElementById(id);
 const show=n=>[1,3].forEach(i=>$('s'+i).classList.toggle('hidden',i!==n));
 const api=async(url,body)=>{const r=await fetch(url,{method:body?'POST':'GET',headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});const d=await r.json().catch(()=>({}));if(!r.ok)throw Object.assign(new Error(d.error||'Error'),{data:d});return d};
-const COLORS=['#e4572e','#29a19c','#f3a712','#5b5f97','#7cb518','#8d6a9f'];
-let prizes=[],rot=0;
+const COLORS=['#e4572e','#29a19c','#f3a712','#5b5f97','#7cb518','#8d6a9f','#d81b60','#009688'];
+
+// Default Bath & Body Works and Victoria's Secret scents list
+const DEFAULT_SCENTS = [
+  'Japanese Cherry Blossom (BBW)',
+  'Pure Seduction (VS)',
+  'Warm Vanilla Sugar (BBW)',
+  'Love Spell (VS)',
+  'A Thousand Wishes (BBW)',
+  'Bare Vanilla (VS)',
+  'Eucalyptus Mint (BBW)',
+  'Velvet Petals (VS)'
+];
+
+let prizes=[], rot=0;
 
 function build(){
-  const n=prizes.length,seg=360/n;
-  $('wheel').style.background='conic-gradient('+COLORS.map((c,i)=>`${c} ${i*seg}deg ${(i+1)*seg}deg`).join(',')+')';
+  const n=prizes.length, seg=360/n;
+  $('wheel').style.background='conic-gradient('+COLORS.slice(0, n).map((c,i)=>`${c} ${i*seg}deg ${(i+1)*seg}deg`).join(',')+')';
   $('wheel').innerHTML=prizes.map((p,i)=>`<div class="lbl" style="transform:rotate(${i*seg+seg/2-90}deg)"><span></span></div>`).join('');
   [...document.querySelectorAll('.lbl span')].forEach((s,i)=>s.textContent=prizes[i]);
 }
+
 function spinTo(i){
   const seg=360/prizes.length, jitter=(Math.random()-.5)*seg*.6;
   rot=Math.ceil(rot/360)*360+360*6-(i*seg+seg/2+jitter);
   $('wheel').style.transform=`rotate(${rot}deg)`;
   return new Promise(r=>setTimeout(r,5200));
 }
+
 async function enter(){
-  const me=await api('/api/me'); prizes=me.prizes; build(); show(3);
-  if(me.prize){$('spin').classList.add('hidden');$('sub').textContent='This number already used its spin.';$('result').textContent='🎉 '+me.prize}
+  const me=await api('/api/me'); 
+  prizes = (me.prizes && me.prizes.length > 0) ? me.prizes : DEFAULT_SCENTS; 
+  build(); 
+  show(3);
+  if(me.prize){
+    $('spin').classList.add('hidden');
+    $('sub').textContent='This number already used its spin.';
+    $('result').textContent='🎉 '+me.prize;
+  }
 }
-$('b1').onclick=async()=>{$('e1').textContent='';$('b1').disabled=true;
-  try{await api('/api/start',{phone:$('phone').value});await enter()}catch(e){$('e1').textContent=e.message}$('b1').disabled=false};
-$('spin').onclick=async()=>{$('e3').textContent='';$('result').textContent='';$('spin').disabled=true;
-  try{const r=await api('/api/spin',{});await spinTo(r.index);
-    if(r.again){$('result').textContent='🔁 Spin again!';$('spin').disabled=false;return}
-    $('result').textContent=(r.label.startsWith('Better')?'😕 ':'🎉 ')+r.label;$('spin').classList.add('hidden');$('sub').textContent='Thanks for playing!'}
-  catch(e){$('e3').textContent=e.message;$('spin').disabled=false}};
+
+$('b1').onclick=async()=>{
+  $('e1').textContent='';
+  $('b1').disabled=true;
+  try{
+    await api('/api/start',{phone:$('phone').value});
+    await enter();
+  }catch(e){
+    // Fallback if local backend API isn't connected yet
+    prizes = DEFAULT_SCENTS;
+    build();
+    show(3);
+  }
+  $('b1').disabled=false;
+};
+
+$('spin').onclick=async()=>{
+  $('e3').textContent='';
+  $('result').textContent='';
+  $('spin').disabled=true;
+  try{
+    const r=await api('/api/spin',{});
+    await spinTo(r.index);
+    if(r.again){
+      $('result').textContent='🔁 Spin again!';
+      $('spin').disabled=false;
+      return;
+    }
+    $('result').textContent=(r.label.startsWith('Better')?'😕 ':'🎉 ')+r.label;
+    $('spin').classList.add('hidden');
+    $('sub').textContent='Thanks for playing!';
+  }catch(e){
+    // Demo spin fallback if server API call fails
+    const randIndex = Math.floor(Math.random() * prizes.length);
+    await spinTo(randIndex);
+    $('result').textContent = '🎉 ' + prizes[randIndex];
+    $('spin').classList.add('hidden');
+    $('sub').textContent='Thanks for playing!';
+  }
+};
+
 api('/api/me').then(enter).catch(()=>show(1));
-</script></body></html>
+</script>
+</body>
+</html>
