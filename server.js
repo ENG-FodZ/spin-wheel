@@ -12,13 +12,37 @@ const app = express();
 app.set('trust proxy', 1);
 app.use(express.json());
 
-if (process.env.NODE_ENV === 'production' && !process.env.SESSION_SECRET) {
-  throw new Error('SESSION_SECRET is required in production');
+// ==================================
+// ENVIRONMENT VALIDATION
+// ==================================
+
+if (!process.env.DATABASE_URL) {
+  throw new Error('DATABASE_URL is missing');
 }
+
+if (
+  process.env.NODE_ENV === 'production' &&
+  !process.env.SESSION_SECRET
+) {
+  throw new Error('SESSION_SECRET is required');
+}
+
+if (
+  process.env.NODE_ENV === 'production' &&
+  (!process.env.ADMIN_USER || !process.env.ADMIN_PASS)
+) {
+  throw new Error('ADMIN_USER and ADMIN_PASS are required');
+}
+
+// ==================================
+// SESSION
+// ==================================
 
 app.use(cookieSession({
   name: 'sw',
-  keys: [process.env.SESSION_SECRET || 'dev-secret-change-this'],
+  keys: [
+    process.env.SESSION_SECRET || 'dev-secret-change-this'
+  ],
   maxAge: 7 * 24 * 60 * 60 * 1000,
   httpOnly: true,
   sameSite: 'lax',
@@ -29,17 +53,11 @@ app.use(cookieSession({
 // NEON DATABASE
 // ==================================
 
-const sql = process.env.DATABASE_URL
-  ? neon(process.env.DATABASE_URL)
-  : null;
+const sql = neon(process.env.DATABASE_URL);
 
 let dbReadyPromise;
 
 async function ensureDatabase() {
-  if (!sql) {
-    throw new Error('DATABASE_URL is missing');
-  }
-
   if (!dbReadyPromise) {
     dbReadyPromise = sql`
       CREATE TABLE IF NOT EXISTS players (
@@ -58,15 +76,16 @@ async function ensureDatabase() {
   await dbReadyPromise;
 }
 
-// Ensure database exists before API requests
+// Database initialization for API routes
 app.use('/api', async (req, res, next) => {
   try {
     await ensureDatabase();
     next();
   } catch (error) {
     console.error('Database initialization failed:', error);
+
     res.status(503).json({
-      error: 'Database unavailable. Check DATABASE_URL.'
+      error: 'Database unavailable'
     });
   }
 });
@@ -84,25 +103,36 @@ const PRIZES = [
   { label: 'Better luck next time', weight: 25 }
 ];
 
+// ==================================
+// RANDOM PRIZE
+// ==================================
+
 function pickPrize() {
-  const total = PRIZES.reduce((sum, p) => sum + p.weight, 0);
+  const total = PRIZES.reduce(
+    (sum, prize) => sum + prize.weight,
+    0
+  );
+
   let random = crypto.randomInt(0, total);
 
   for (let i = 0; i < PRIZES.length; i++) {
     random -= PRIZES[i].weight;
 
-    if (random < 0) return i;
+    if (random < 0) {
+      return i;
+    }
   }
 
   return PRIZES.length - 1;
 }
 
 // ==================================
-// PHONE VALIDATION
+// PHONE NORMALIZATION
 // ==================================
 
 function normPhone(raw) {
   let phone = String(raw || '').replace(/[^\d+]/g, '');
+
   const cc = process.env.DEFAULT_COUNTRY_CODE || '20';
 
   if (phone.startsWith('00')) {
@@ -113,11 +143,13 @@ function normPhone(raw) {
     phone = '+' + phone;
   }
 
-  return /^\+\d{9,15}$/.test(phone) ? phone : null;
+  return /^\+\d{9,15}$/.test(phone)
+    ? phone
+    : null;
 }
 
 // ==================================
-// RATE LIMITER
+// RATE LIMITING
 // ==================================
 
 const limiter = rateLimit({
@@ -134,7 +166,9 @@ const limiter = rateLimit({
 app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  res.sendFile(
+    path.join(__dirname, 'public', 'index.html')
+  );
 });
 
 // ==================================
@@ -172,6 +206,7 @@ app.post('/api/start', limiter, async (req, res, next) => {
     req.session.uid = player.id;
 
     res.json({ ok: true });
+
   } catch (error) {
     next(error);
   }
@@ -208,6 +243,7 @@ app.get('/api/me', async (req, res, next) => {
       prize: user.prize,
       prizes: PRIZES.map(p => p.label)
     });
+
   } catch (error) {
     next(error);
   }
@@ -257,6 +293,7 @@ app.post('/api/spin', limiter, async (req, res, next) => {
       });
     }
 
+    // Atomic update prevents multiple winning spins
     const updated = await sql`
       UPDATE players
       SET prize = ${prize.label},
@@ -277,6 +314,7 @@ app.post('/api/spin', limiter, async (req, res, next) => {
       label: prize.label,
       again: false
     });
+
   } catch (error) {
     next(error);
   }
@@ -286,15 +324,37 @@ app.post('/api/spin', limiter, async (req, res, next) => {
 // ADMIN AUTHENTICATION
 // ==================================
 
+function safeCompare(a, b) {
+  const first = Buffer.from(a);
+  const second = Buffer.from(b);
+
+  return first.length > 0 &&
+    first.length === second.length &&
+    crypto.timingSafeEqual(first, second);
+}
+
+function askForLogin(res) {
+  res.set('WWW-Authenticate', 'Basic realm="Admin"');
+  return res.status(401).send('Auth required');
+}
+
 function admin(req, res, next) {
   const authorization = req.headers.authorization || '';
+
   const parts = authorization.split(' ');
 
   if (parts[0] !== 'Basic' || !parts[1]) {
     return askForLogin(res);
   }
 
-  const decoded = Buffer.from(parts[1], 'base64').toString();
+  let decoded;
+
+  try {
+    decoded = Buffer.from(parts[1], 'base64').toString();
+  } catch {
+    return askForLogin(res);
+  }
+
   const separator = decoded.indexOf(':');
 
   const username = separator >= 0
@@ -305,27 +365,15 @@ function admin(req, res, next) {
     ? decoded.slice(separator + 1)
     : '';
 
-  function safeCompare(a, b) {
-    const first = Buffer.from(a);
-    const second = Buffer.from(b);
-
-    return first.length > 0 &&
-      first.length === second.length &&
-      crypto.timingSafeEqual(first, second);
-  }
-
   const valid =
     safeCompare(username, process.env.ADMIN_USER || '') &&
     safeCompare(password, process.env.ADMIN_PASS || '');
 
-  if (valid) return next();
+  if (valid) {
+    return next();
+  }
 
   return askForLogin(res);
-}
-
-function askForLogin(res) {
-  res.set('WWW-Authenticate', 'Basic realm="Admin"');
-  return res.status(401).send('Auth required');
 }
 
 // ==================================
@@ -333,11 +381,13 @@ function askForLogin(res) {
 // ==================================
 
 app.get('/admin', admin, (req, res) => {
-  res.sendFile(path.join(__dirname, 'admin.html'));
+  res.sendFile(
+    path.join(__dirname, 'admin.html')
+  );
 });
 
 // ==================================
-// ADMIN USERS
+// ADMIN PLAYERS
 // ==================================
 
 app.get('/api/admin/users', admin, async (req, res, next) => {
@@ -349,6 +399,7 @@ app.get('/api/admin/users', admin, async (req, res, next) => {
     `;
 
     res.json(users);
+
   } catch (error) {
     next(error);
   }
@@ -359,11 +410,13 @@ app.get('/api/admin/users', admin, async (req, res, next) => {
 // ==================================
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok' });
+  res.json({
+    status: 'ok'
+  });
 });
 
 // ==================================
-// ERROR HANDLING
+// 404
 // ==================================
 
 app.use((req, res) => {
@@ -373,20 +426,32 @@ app.use((req, res) => {
   });
 });
 
+// ==================================
+// GLOBAL ERROR HANDLER
+// ==================================
+
 app.use((error, req, res, next) => {
   console.error('Server error:', error);
 
-  if (res.headersSent) return next(error);
+  if (res.headersSent) {
+    return next(error);
+  }
 
   res.status(500).json({
     error: 'Internal server error'
   });
 });
 
-// Vercel
+// ==================================
+// VERCEL EXPORT
+// ==================================
+
 module.exports = app;
 
-// Local development
+// ==================================
+// LOCAL DEVELOPMENT
+// ==================================
+
 if (require.main === module) {
   const PORT = process.env.PORT || 3000;
 
